@@ -1,42 +1,57 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
+import DrawReveal from '../components/DrawReveal';
 import { api, ApiClientError, storage } from '../lib/api/client';
-import type { LotteryResultItem } from '../types/lottery';
+import type { ResultViewItem } from '../types/resultView';
+import { presentationMode, toResultViewItems } from '../utils/resultViewModel';
 
-type PageState = 'idle' | 'drawing' | 'done' | 'error' | 'no_auth';
+type PageState = 'loading' | 'idle' | 'drawing' | 'revealing' | 'done' | 'error' | 'no_auth';
+
+const ERROR_MESSAGES: Record<string, string> = {
+  ALREADY_DRAWN: '抽選は既に完了しています。',
+  DRAW_NOT_ALLOWED: '参加を締め切ってから抽選してください。',
+  FORBIDDEN: '操作権限がありません。',
+  VALIDATION_ERROR: '入力内容を確認してください。',
+  SERVER_ERROR: 'サーバーエラーが発生しました。',
+};
 
 export default function HostDrawPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const session = storage.loadHostSession();
   const hostToken = session?.hostToken ?? '';
 
-  const [pageState, setPageState] = useState<PageState>(() => {
-    if (!session || session.roomId !== roomId) return 'no_auth';
-    return 'idle';
-  });
+  const [pageState, setPageState] = useState<PageState>(() =>
+    !session || session.roomId !== roomId ? 'no_auth' : 'loading'
+  );
 
-  const [results, setResults] = useState<LotteryResultItem[]>([]);
+  const [items, setItems] = useState<ResultViewItem[]>([]);
   const [drawnAt, setDrawnAt] = useState('');
   const [ranked, setRanked] = useState(false);
+  const [animate, setAnimate] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // On mount: check if already drawn
+  // On mount: check for existing result
   useEffect(() => {
     if (pageState === 'no_auth' || !roomId) return;
 
-    api.getRoomResult(roomId, hostToken)
+    api
+      .getRoomResult(roomId, hostToken)
       .then((data) => {
-        setResults(data.results);
+        const viewItems = toResultViewItems(data.results, '', '');
+        setItems(viewItems);
         setDrawnAt(data.drawnAt);
-        setRanked(data.results.some((r) => r.rank !== null));
+        setRanked(presentationMode(viewItems) === 'ranked');
+        setAnimate(false); // reload → skip animation
         setPageState('done');
       })
       .catch((err: unknown) => {
-        // 404 = not drawn yet, stay idle
-        if (err instanceof ApiClientError && err.status === 404) return;
-        // other errors silently ignored — user can still trigger draw
+        if (err instanceof ApiClientError && err.status === 404) {
+          setPageState('idle');
+        } else {
+          setPageState('idle');
+        }
       });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleDraw = async () => {
@@ -44,37 +59,34 @@ export default function HostDrawPage() {
     setPageState('drawing');
     setErrorMsg('');
 
-    // Brief fake loading for UX
-    await new Promise((r) => setTimeout(r, 1500));
-
     try {
       const data = await api.drawLottery(roomId, hostToken);
-      setResults(data.results);
+      const viewItems = toResultViewItems(data.results, '', '');
+      setItems(viewItems);
       setDrawnAt(data.drawnAt);
-      setRanked(data.results.some((r) => r.rank !== null));
-      setPageState('done');
+      setRanked(presentationMode(viewItems) === 'ranked');
+      setAnimate(true); // fresh draw → animate
+      setPageState('revealing');
     } catch (err) {
       if (err instanceof ApiClientError) {
         if (err.code === 'ALREADY_DRAWN') {
-          // fetch existing result
+          // Fetch and show existing
           try {
             const existing = await api.getRoomResult(roomId, hostToken);
-            setResults(existing.results);
+            const viewItems = toResultViewItems(existing.results, '', '');
+            setItems(viewItems);
             setDrawnAt(existing.drawnAt);
-            setRanked(existing.results.some((r) => r.rank !== null));
+            setRanked(presentationMode(viewItems) === 'ranked');
+            setAnimate(false);
             setPageState('done');
             return;
           } catch {
-            // fall through to error
+            // fall through
           }
         }
-        if (err.code === 'DRAW_NOT_ALLOWED') {
-          setErrorMsg('抽選は参加締め切り後にのみ実行できます。');
-        } else {
-          setErrorMsg(err.message);
-        }
+        setErrorMsg(ERROR_MESSAGES[err.code] ?? err.message);
       } else {
-        setErrorMsg('抽選に失敗しました。もう一度お試しください。');
+        setErrorMsg(ERROR_MESSAGES['SERVER_ERROR']);
       }
       setPageState('error');
     }
@@ -97,6 +109,13 @@ export default function HostDrawPage() {
         <h1 style={styles.title}>くじ引き</h1>
       </div>
 
+      {pageState === 'loading' && (
+        <div style={styles.centerBox}>
+          <div style={styles.spinner} />
+          <p style={styles.subtleText}>読み込み中...</p>
+        </div>
+      )}
+
       {pageState === 'idle' && (
         <div style={styles.centerBox}>
           <p style={styles.subtitle}>準備ができたら抽選開始ボタンを押してください。</p>
@@ -108,7 +127,7 @@ export default function HostDrawPage() {
 
       {pageState === 'drawing' && (
         <div style={styles.centerBox}>
-          <div style={styles.spinner} />
+          <div style={styles.bigSpinner} />
           <p style={styles.drawingText}>抽選中...</p>
         </div>
       )}
@@ -120,37 +139,28 @@ export default function HostDrawPage() {
         </div>
       )}
 
-      {pageState === 'done' && (
+      {(pageState === 'revealing' || pageState === 'done') && (
         <div>
           <div style={styles.doneHeader}>
             <span style={styles.doneIcon}>🎊</span>
             <h2 style={styles.doneTitle}>抽選結果</h2>
             {drawnAt && (
-              <p style={styles.drawnAt}>
-                {new Date(drawnAt).toLocaleString('ja-JP')}
-              </p>
+              <p style={styles.drawnAt}>{new Date(drawnAt).toLocaleString('ja-JP')}</p>
             )}
           </div>
 
-          <ul style={styles.resultList}>
-            {results.map((item, idx) => (
-              <li key={item.participant_id} style={styles.resultItem}>
-                <div style={styles.resultRankBox}>
-                  {ranked && item.rank !== null ? (
-                    <span style={{ ...styles.rankBadge, ...(item.rank === 1 ? styles.rank1 : item.rank === 2 ? styles.rank2 : item.rank === 3 ? styles.rank3 : {}) }}>
-                      {item.rank}位
-                    </span>
-                  ) : (
-                    <span style={styles.rankBadge}>{idx + 1}</span>
-                  )}
-                </div>
-                <div style={styles.resultInfo}>
-                  <span style={styles.resultNickname}>{item.nickname}</span>
-                  {item.role && <span style={styles.resultRole}>{item.role}</span>}
-                </div>
-              </li>
-            ))}
-          </ul>
+          <DrawReveal
+            items={items}
+            ranked={ranked}
+            animate={animate}
+            onComplete={() => setPageState('done')}
+          />
+
+          {pageState === 'done' && (
+            <p style={styles.drawnNotice}>
+              抽選は完了しています。再実行はできません。
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -163,24 +173,36 @@ const styles: Record<string, React.CSSProperties> = {
   backLink: { fontSize: 13, color: '#3b82f6', textDecoration: 'none' },
   title: { fontSize: 24, fontWeight: 700, marginTop: 8, marginBottom: 0 },
   subtitle: { color: '#555', marginBottom: 24 },
-  centerBox: { textAlign: 'center', padding: '40px 0' },
-  drawButton: { background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: '14px 32px', fontSize: 18, cursor: 'pointer', fontWeight: 700 },
-  spinner: { width: 48, height: 48, border: '4px solid #e0e0e0', borderTop: '4px solid #7c3aed', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' },
-  drawingText: { fontSize: 18, color: '#555', fontWeight: 600 },
+  subtleText: { color: '#888', fontSize: 14 },
+  centerBox: { textAlign: 'center', padding: '48px 0' },
+  drawButton: {
+    background: '#7c3aed', color: '#fff', border: 'none',
+    borderRadius: 8, padding: '14px 36px', fontSize: 18,
+    cursor: 'pointer', fontWeight: 700,
+  },
+  spinner: {
+    width: 32, height: 32, border: '3px solid #e0e0e0',
+    borderTop: '3px solid #7c3aed', borderRadius: '50%',
+    animation: 'spin 1s linear infinite', margin: '0 auto 16px',
+  },
+  bigSpinner: {
+    width: 56, height: 56, border: '5px solid #e0e0e0',
+    borderTop: '5px solid #7c3aed', borderRadius: '50%',
+    animation: 'spin 0.8s linear infinite', margin: '0 auto 20px',
+  },
+  drawingText: { fontSize: 20, color: '#555', fontWeight: 600 },
   errorText: { color: '#ef4444', fontSize: 15, marginBottom: 16 },
   doneHeader: { textAlign: 'center', marginBottom: 24 },
   doneIcon: { fontSize: 48, display: 'block' },
   doneTitle: { fontSize: 22, fontWeight: 700, marginTop: 8, marginBottom: 4 },
   drawnAt: { fontSize: 12, color: '#888', margin: 0 },
-  resultList: { listStyle: 'none', padding: 0, margin: 0 },
-  resultItem: { display: 'flex', alignItems: 'center', gap: 16, padding: '12px 0', borderBottom: '1px solid #eee' },
-  resultRankBox: { width: 48, flexShrink: 0, textAlign: 'center' },
-  rankBadge: { display: 'inline-block', background: '#e0e7ff', color: '#3730a3', borderRadius: 20, padding: '4px 10px', fontSize: 13, fontWeight: 700 },
-  rank1: { background: '#fef08a', color: '#92400e' },
-  rank2: { background: '#d1d5db', color: '#374151' },
-  rank3: { background: '#fed7aa', color: '#92400e' },
-  resultInfo: { display: 'flex', flexDirection: 'column', gap: 2 },
-  resultNickname: { fontSize: 16, fontWeight: 600 },
-  resultRole: { fontSize: 13, color: '#6b7280', background: '#f3f4f6', borderRadius: 4, padding: '1px 6px', display: 'inline-block' },
-  linkButton: { background: '#3b82f6', color: '#fff', borderRadius: 6, padding: '10px 20px', fontSize: 14, textDecoration: 'none', display: 'inline-block' },
+  drawnNotice: {
+    marginTop: 20, textAlign: 'center', fontSize: 13,
+    color: '#9ca3af', background: '#f9fafb',
+    border: '1px solid #e5e7eb', borderRadius: 6, padding: '10px 16px',
+  },
+  linkButton: {
+    background: '#3b82f6', color: '#fff', borderRadius: 6,
+    padding: '10px 20px', fontSize: 14, textDecoration: 'none', display: 'inline-block',
+  },
 };
