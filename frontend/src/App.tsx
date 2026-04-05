@@ -1,4 +1,5 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import HostDrawPage from './pages/HostDrawPage';
 import HostRoomPage from './pages/HostRoomPage';
 import JoinPage from './pages/JoinPage';
 import ParticipantWaitingPage from './pages/ParticipantWaitingPage';
@@ -10,6 +11,7 @@ export default function App() {
         <Route path="/" element={<HostRoomPage />} />
         <Route path="/join/:joinCode" element={<JoinPage />} />
         <Route path="/room/:roomId/participant" element={<ParticipantWaitingPage />} />
+        <Route path="/room/:roomId/draw" element={<HostDrawPage />} />
       </Routes>
     </BrowserRouter>
   );

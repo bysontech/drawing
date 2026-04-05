@@ -18,6 +18,13 @@ export interface Participant {
   joined_at: string;
 }
 
+export interface LotteryResultRow {
+  id: string;
+  room_id: string;
+  results: string;
+  drawn_at: string;
+}
+
 export interface CreateRoomResult {
   roomId: string;
   joinCode: string;
@@ -29,6 +36,21 @@ export interface JoinResult {
   participantToken: string;
   roomId: string;
 }
+
+export interface LotterySettingsData {
+  ranked: boolean;
+  winner_count: number;
+  roles: string[];
+}
+
+export interface LotteryResultItem {
+  rank: number | null;
+  participant_id: string;
+  nickname: string;
+  role: string | null;
+}
+
+// ── Room ──────────────────────────────────────────────
 
 export async function createRoom(db: D1Database): Promise<CreateRoomResult> {
   const id = generateUUID();
@@ -63,6 +85,36 @@ export async function getRoomById(db: D1Database, roomId: string): Promise<Room 
   return result ?? null;
 }
 
+export async function closeRoom(db: D1Database, roomId: string): Promise<void> {
+  await db
+    .prepare("UPDATE rooms SET status = 'closed' WHERE id = ?")
+    .bind(roomId)
+    .run();
+}
+
+export async function markRoomDrawn(db: D1Database, roomId: string): Promise<void> {
+  await db
+    .prepare("UPDATE rooms SET status = 'drawn' WHERE id = ?")
+    .bind(roomId)
+    .run();
+}
+
+export async function updateRoomSettings(
+  db: D1Database,
+  roomId: string,
+  settings: LotterySettingsData,
+  showResultToParticipants: number
+): Promise<void> {
+  await db
+    .prepare(
+      'UPDATE rooms SET lottery_settings = ?, show_result_to_participants = ? WHERE id = ?'
+    )
+    .bind(JSON.stringify(settings), showResultToParticipants, roomId)
+    .run();
+}
+
+// ── Participants ───────────────────────────────────────
+
 export async function joinParticipant(
   db: D1Database,
   roomId: string,
@@ -88,15 +140,52 @@ export async function listParticipantsByRoom(
   roomId: string
 ): Promise<Pick<Participant, 'id' | 'nickname' | 'joined_at'>[]> {
   const result = await db
-    .prepare('SELECT id, nickname, joined_at FROM participants WHERE room_id = ? ORDER BY joined_at ASC')
+    .prepare(
+      'SELECT id, nickname, joined_at FROM participants WHERE room_id = ? ORDER BY joined_at ASC'
+    )
     .bind(roomId)
     .all<Pick<Participant, 'id' | 'nickname' | 'joined_at'>>();
   return result.results;
 }
 
-export async function closeRoom(db: D1Database, roomId: string): Promise<void> {
-  await db
-    .prepare("UPDATE rooms SET status = 'closed' WHERE id = ?")
+export async function countParticipantsByRoom(db: D1Database, roomId: string): Promise<number> {
+  const row = await db
+    .prepare('SELECT COUNT(*) as cnt FROM participants WHERE room_id = ?')
     .bind(roomId)
+    .first<{ cnt: number }>();
+  return row?.cnt ?? 0;
+}
+
+// ── Lottery Results ────────────────────────────────────
+
+export async function saveLotteryResult(
+  db: D1Database,
+  roomId: string,
+  results: LotteryResultItem[]
+): Promise<void> {
+  const id = generateUUID();
+  const now = new Date().toISOString();
+  await db
+    .prepare(
+      'INSERT INTO lottery_results (id, room_id, results, drawn_at) VALUES (?, ?, ?, ?)'
+    )
+    .bind(id, roomId, JSON.stringify(results), now)
     .run();
+}
+
+export async function getLotteryResultByRoom(
+  db: D1Database,
+  roomId: string
+): Promise<LotteryResultRow | null> {
+  const result = await db
+    .prepare('SELECT * FROM lottery_results WHERE room_id = ?')
+    .bind(roomId)
+    .first<LotteryResultRow>();
+  return result ?? null;
+}
+
+// ── Auth helper ────────────────────────────────────────
+
+export function verifyHostToken(room: Room, hostToken: string | undefined): boolean {
+  return !!hostToken && room.host_token === hostToken;
 }

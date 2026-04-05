@@ -1,27 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiClientError } from '../lib/api/client';
+import { Link } from 'react-router-dom';
+import { api, ApiClientError, storage } from '../lib/api/client';
+import type { LotterySettings } from '../types/lottery';
 import type { CreateRoomResponse, Participant, RoomStatus } from '../types/room';
 
-const HOST_TOKEN_KEY = 'party_lottery_host_token';
-const ROOM_ID_KEY = 'party_lottery_room_id';
-const JOIN_CODE_KEY = 'party_lottery_join_code';
 const POLL_INTERVAL_MS = 3000;
 
 function getJoinUrl(joinCode: string): string {
   return `${window.location.origin}/join/${joinCode}`;
 }
 
-export default function HostRoomPage() {
-  const [room, setRoom] = useState<CreateRoomResponse | null>(() => {
-    const roomId = localStorage.getItem(ROOM_ID_KEY);
-    const joinCode = localStorage.getItem(JOIN_CODE_KEY);
-    const hostToken = localStorage.getItem(HOST_TOKEN_KEY);
-    if (roomId && joinCode && hostToken) {
-      return { roomId, joinCode, hostToken };
-    }
-    return null;
-  });
+const DEFAULT_SETTINGS: LotterySettings = {
+  ranked: false,
+  winner_count: 1,
+  roles: [],
+  show_result_to_participants: false,
+};
 
+export default function HostRoomPage() {
+  const [room, setRoom] = useState<CreateRoomResponse | null>(() => storage.loadHostSession());
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [roomStatus, setRoomStatus] = useState<RoomStatus>('waiting');
   const [participantCount, setParticipantCount] = useState(0);
@@ -29,6 +26,14 @@ export default function HostRoomPage() {
   const [closing, setClosing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Settings form state
+  const [settings, setSettings] = useState<LotterySettings>(DEFAULT_SETTINGS);
+  const [rolesInput, setRolesInput] = useState('');
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsSaved, setSettingsSaved] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchParticipants = useCallback(async (roomId: string) => {
@@ -44,16 +49,9 @@ export default function HostRoomPage() {
 
   useEffect(() => {
     if (!room) return;
-
     fetchParticipants(room.roomId);
-
-    pollRef.current = setInterval(() => {
-      fetchParticipants(room.roomId);
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
+    pollRef.current = setInterval(() => fetchParticipants(room.roomId), POLL_INTERVAL_MS);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [room, fetchParticipants]);
 
   const handleCreateRoom = async () => {
@@ -61,16 +59,15 @@ export default function HostRoomPage() {
     setError(null);
     try {
       const result = await api.createRoom();
-      localStorage.setItem(HOST_TOKEN_KEY, result.hostToken);
-      localStorage.setItem(ROOM_ID_KEY, result.roomId);
-      localStorage.setItem(JOIN_CODE_KEY, result.joinCode);
+      storage.saveHostSession(result.roomId, result.joinCode, result.hostToken);
       setRoom(result);
       setParticipants([]);
       setParticipantCount(0);
       setRoomStatus('waiting');
-    } catch (err) {
+      setSettings(DEFAULT_SETTINGS);
+      setRolesInput('');
+    } catch {
       setError('ルームの作成に失敗しました。もう一度お試しください。');
-      console.error(err);
     } finally {
       setCreating(false);
     }
@@ -83,7 +80,37 @@ export default function HostRoomPage() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      // fallback: select text
+      // ignore
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    if (!room) return;
+    setSavingSettings(true);
+    setSettingsError(null);
+    setSettingsSaved(false);
+
+    const roles = rolesInput
+      .split(',')
+      .map((r) => r.trim())
+      .filter(Boolean)
+      .slice(0, 20);
+
+    const payload: LotterySettings = { ...settings, roles };
+
+    try {
+      await api.updateRoomSettings(room.roomId, room.hostToken, payload);
+      setSettings(payload);
+      setSettingsSaved(true);
+      setTimeout(() => setSettingsSaved(false), 2000);
+    } catch (err) {
+      if (err instanceof ApiClientError) {
+        setSettingsError(err.message);
+      } else {
+        setSettingsError('設定の保存に失敗しました。');
+      }
+    } finally {
+      setSavingSettings(false);
     }
   };
 
@@ -96,7 +123,11 @@ export default function HostRoomPage() {
       setRoomStatus('closed');
     } catch (err) {
       if (err instanceof ApiClientError) {
-        setError(`締め切りに失敗しました: ${err.message}`);
+        if (err.code === 'VALIDATION_ERROR') {
+          setError('参加者が1名以上必要です。');
+        } else {
+          setError(`締め切りに失敗しました: ${err.message}`);
+        }
       } else {
         setError('締め切りに失敗しました。もう一度お試しください。');
       }
@@ -106,13 +137,13 @@ export default function HostRoomPage() {
   };
 
   const handleReset = () => {
-    localStorage.removeItem(HOST_TOKEN_KEY);
-    localStorage.removeItem(ROOM_ID_KEY);
-    localStorage.removeItem(JOIN_CODE_KEY);
+    storage.clearHostSession();
     setRoom(null);
     setParticipants([]);
     setParticipantCount(0);
     setRoomStatus('waiting');
+    setSettings(DEFAULT_SETTINGS);
+    setRolesInput('');
   };
 
   if (!room) {
@@ -132,12 +163,14 @@ export default function HostRoomPage() {
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>パーティーくじ引き — 主催者画面</h1>
+      <div style={styles.header}>
+        <h1 style={styles.title}>パーティーくじ引き — 主催者画面</h1>
+        <span style={{ ...styles.statusBadge, ...(roomStatus !== 'waiting' ? styles.statusBadgeClosed : {}) }}>
+          {roomStatus === 'waiting' ? '受付中' : roomStatus === 'closed' ? '受付終了' : '抽選済み'}
+        </span>
+      </div>
 
-      {roomStatus === 'closed' && (
-        <div style={styles.closedBanner}>受付終了済み</div>
-      )}
-
+      {/* Join URL */}
       <section style={styles.section}>
         <h2 style={styles.sectionTitle}>参加用URL</h2>
         <div style={styles.urlBox}>
@@ -151,12 +184,71 @@ export default function HostRoomPage() {
         </p>
       </section>
 
+      {/* Settings */}
+      <section style={styles.section}>
+        <h2 style={styles.sectionTitle}>抽選設定</h2>
+        <div style={styles.formRow}>
+          <label style={styles.checkLabel}>
+            <input
+              type="checkbox"
+              checked={settings.ranked}
+              onChange={(e) => setSettings((s) => ({ ...s, ranked: e.target.checked }))}
+              disabled={roomStatus === 'drawn'}
+            />
+            {' '}順位あり
+          </label>
+        </div>
+        <div style={styles.formRow}>
+          <label style={styles.fieldLabel}>当選人数</label>
+          <input
+            type="number"
+            min={1}
+            value={settings.winner_count}
+            onChange={(e) => setSettings((s) => ({ ...s, winner_count: Math.max(1, Number(e.target.value)) }))}
+            style={styles.numberInput}
+            disabled={roomStatus === 'drawn'}
+          />
+        </div>
+        <div style={styles.formRow}>
+          <label style={styles.fieldLabel}>役割（カンマ区切り）</label>
+          <input
+            type="text"
+            value={rolesInput}
+            onChange={(e) => setRolesInput(e.target.value)}
+            placeholder="例: 司会, 幹事, 会計"
+            style={styles.textInput}
+            disabled={roomStatus === 'drawn'}
+          />
+        </div>
+        <div style={styles.formRow}>
+          <label style={styles.checkLabel}>
+            <input
+              type="checkbox"
+              checked={settings.show_result_to_participants}
+              onChange={(e) =>
+                setSettings((s) => ({ ...s, show_result_to_participants: e.target.checked }))
+              }
+              disabled={roomStatus === 'drawn'}
+            />
+            {' '}参加者に結果を公開する
+          </label>
+        </div>
+        {settingsError && <p style={styles.errorText}>{settingsError}</p>}
+        <button
+          style={{ ...styles.secondaryButton, opacity: roomStatus === 'drawn' ? 0.5 : 1 }}
+          onClick={handleSaveSettings}
+          disabled={savingSettings || roomStatus === 'drawn'}
+        >
+          {savingSettings ? '保存中...' : settingsSaved ? '保存しました!' : '設定を保存'}
+        </button>
+      </section>
+
+      {/* Participants */}
       <section style={styles.section}>
         <div style={styles.participantHeader}>
           <h2 style={styles.sectionTitle}>参加者一覧</h2>
           <span style={styles.countBadge}>{participantCount} 名</span>
         </div>
-
         {participants.length === 0 ? (
           <p style={styles.emptyText}>まだ参加者はいません。URLを共有してください。</p>
         ) : (
@@ -175,18 +267,23 @@ export default function HostRoomPage() {
 
       {error && <p style={styles.errorText}>{error}</p>}
 
+      {/* Actions */}
       <div style={styles.actionRow}>
-        <button
-          style={{
-            ...styles.dangerButton,
-            opacity: roomStatus !== 'waiting' || closing ? 0.5 : 1,
-            cursor: roomStatus !== 'waiting' || closing ? 'not-allowed' : 'pointer',
-          }}
-          onClick={handleCloseRoom}
-          disabled={roomStatus !== 'waiting' || closing}
-        >
-          {closing ? '処理中...' : '参加を締め切る'}
-        </button>
+        {roomStatus === 'waiting' && (
+          <button
+            style={{ ...styles.dangerButton, opacity: closing ? 0.5 : 1 }}
+            onClick={handleCloseRoom}
+            disabled={closing}
+          >
+            {closing ? '処理中...' : '参加を締め切る'}
+          </button>
+        )}
+
+        {(roomStatus === 'closed' || roomStatus === 'drawn') && (
+          <Link to={`/room/${room.roomId}/draw`} style={styles.drawLink}>
+            {roomStatus === 'drawn' ? '抽選結果を見る' : 'くじ引きを開始する →'}
+          </Link>
+        )}
 
         <button style={styles.secondaryButton} onClick={handleReset}>
           新しいルームを作る
@@ -197,146 +294,33 @@ export default function HostRoomPage() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: {
-    maxWidth: 600,
-    margin: '0 auto',
-    padding: '24px 16px',
-    fontFamily: 'system-ui, sans-serif',
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: 700,
-    marginBottom: 8,
-  },
-  subtitle: {
-    color: '#555',
-    marginBottom: 24,
-  },
-  section: {
-    marginBottom: 24,
-    padding: 16,
-    border: '1px solid #e0e0e0',
-    borderRadius: 8,
-    background: '#fafafa',
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: 600,
-    marginBottom: 12,
-    marginTop: 0,
-  },
-  urlBox: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  urlText: {
-    fontFamily: 'monospace',
-    fontSize: 13,
-    background: '#fff',
-    border: '1px solid #ccc',
-    borderRadius: 4,
-    padding: '6px 10px',
-    wordBreak: 'break-all',
-    flex: 1,
-  },
-  codeLabel: {
-    marginTop: 8,
-    fontSize: 14,
-    color: '#333',
-  },
-  participantHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 12,
-  },
-  countBadge: {
-    background: '#3b82f6',
-    color: '#fff',
-    borderRadius: 12,
-    padding: '2px 10px',
-    fontSize: 13,
-    fontWeight: 600,
-  },
-  emptyText: {
-    color: '#888',
-    fontSize: 14,
-    margin: 0,
-  },
-  participantList: {
-    listStyle: 'none',
-    padding: 0,
-    margin: 0,
-  },
-  participantItem: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    padding: '6px 0',
-    borderBottom: '1px solid #eee',
-    fontSize: 14,
-  },
-  joinedAt: {
-    color: '#888',
-    fontSize: 12,
-  },
-  closedBanner: {
-    background: '#f97316',
-    color: '#fff',
-    padding: '8px 16px',
-    borderRadius: 6,
-    marginBottom: 16,
-    fontWeight: 600,
-    textAlign: 'center',
-  },
-  actionRow: {
-    display: 'flex',
-    gap: 12,
-    flexWrap: 'wrap',
-    marginTop: 8,
-  },
-  primaryButton: {
-    background: '#3b82f6',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 6,
-    padding: '10px 20px',
-    fontSize: 15,
-    cursor: 'pointer',
-    fontWeight: 600,
-  },
-  secondaryButton: {
-    background: '#fff',
-    color: '#333',
-    border: '1px solid #ccc',
-    borderRadius: 6,
-    padding: '10px 20px',
-    fontSize: 14,
-    cursor: 'pointer',
-  },
-  copyButton: {
-    background: '#10b981',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 6,
-    padding: '6px 14px',
-    fontSize: 13,
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-  },
-  dangerButton: {
-    background: '#ef4444',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 6,
-    padding: '10px 20px',
-    fontSize: 14,
-    fontWeight: 600,
-  },
-  errorText: {
-    color: '#ef4444',
-    fontSize: 14,
-    marginBottom: 12,
-  },
+  container: { maxWidth: 600, margin: '0 auto', padding: '24px 16px', fontFamily: 'system-ui, sans-serif' },
+  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 },
+  title: { fontSize: 22, fontWeight: 700, margin: 0 },
+  subtitle: { color: '#555', marginBottom: 24 },
+  statusBadge: { background: '#22c55e', color: '#fff', borderRadius: 12, padding: '3px 12px', fontSize: 13, fontWeight: 600 },
+  statusBadgeClosed: { background: '#f97316' },
+  section: { marginBottom: 20, padding: 16, border: '1px solid #e0e0e0', borderRadius: 8, background: '#fafafa' },
+  sectionTitle: { fontSize: 15, fontWeight: 600, marginBottom: 12, marginTop: 0 },
+  urlBox: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  urlText: { fontFamily: 'monospace', fontSize: 13, background: '#fff', border: '1px solid #ccc', borderRadius: 4, padding: '6px 10px', wordBreak: 'break-all', flex: 1 },
+  codeLabel: { marginTop: 8, fontSize: 14, color: '#333' },
+  formRow: { marginBottom: 10 },
+  checkLabel: { fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 },
+  fieldLabel: { display: 'block', fontSize: 13, color: '#555', marginBottom: 4 },
+  numberInput: { width: 80, padding: '6px 8px', fontSize: 14, border: '1px solid #ccc', borderRadius: 4 },
+  textInput: { width: '100%', padding: '6px 8px', fontSize: 14, border: '1px solid #ccc', borderRadius: 4, boxSizing: 'border-box' },
+  participantHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  countBadge: { background: '#3b82f6', color: '#fff', borderRadius: 12, padding: '2px 10px', fontSize: 13, fontWeight: 600 },
+  emptyText: { color: '#888', fontSize: 14, margin: 0 },
+  participantList: { listStyle: 'none', padding: 0, margin: 0 },
+  participantItem: { display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #eee', fontSize: 14 },
+  joinedAt: { color: '#888', fontSize: 12 },
+  actionRow: { display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 8 },
+  primaryButton: { background: '#3b82f6', color: '#fff', border: 'none', borderRadius: 6, padding: '10px 20px', fontSize: 15, cursor: 'pointer', fontWeight: 600 },
+  secondaryButton: { background: '#fff', color: '#333', border: '1px solid #ccc', borderRadius: 6, padding: '10px 20px', fontSize: 14, cursor: 'pointer' },
+  copyButton: { background: '#10b981', color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap' },
+  dangerButton: { background: '#ef4444', color: '#fff', border: 'none', borderRadius: 6, padding: '10px 20px', fontSize: 14, fontWeight: 600, cursor: 'pointer' },
+  drawLink: { background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 6, padding: '10px 20px', fontSize: 14, fontWeight: 600, cursor: 'pointer', textDecoration: 'none', display: 'inline-block' },
+  errorText: { color: '#ef4444', fontSize: 14, marginBottom: 12 },
 };
