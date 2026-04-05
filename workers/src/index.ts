@@ -51,7 +51,12 @@ app.get('/rooms/join/:joinCode', async (c) => {
     if (!room) {
       return c.json({ code: 'ROOM_NOT_FOUND', message: 'Room not found' }, 404);
     }
-    return c.json({ roomId: room.id, joinCode: room.join_code, status: room.status });
+    return c.json({
+      roomId: room.id,
+      joinCode: room.join_code,
+      status: room.status,
+      showResultToParticipants: room.show_result_to_participants === 1,
+    });
   } catch (err) {
     console.error('GET /rooms/join/:joinCode', err);
     return c.json({ code: 'SERVER_ERROR', message: 'Internal server error' }, 500);
@@ -156,7 +161,11 @@ app.patch('/rooms/:roomId/settings', async (c) => {
     const winnerCount =
       typeof raw.winner_count === 'number' ? raw.winner_count : current.winner_count;
     const roles = Array.isArray(raw.roles)
-      ? (raw.roles as unknown[]).filter((r): r is string => typeof r === 'string').slice(0, 20)
+      ? (raw.roles as unknown[])
+          .filter((r): r is string => typeof r === 'string')
+          .map((r) => r.trim())
+          .filter(Boolean)
+          .slice(0, 20)
       : current.roles;
     const showResult =
       typeof raw.show_result_to_participants === 'boolean'

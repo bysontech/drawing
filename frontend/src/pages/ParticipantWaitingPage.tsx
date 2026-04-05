@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import DrawReveal from '../components/DrawReveal';
 import { api, ApiClientError, storage } from '../lib/api/client';
-import type { LotteryResultItem } from '../types/lottery';
+import type { ResultViewItem } from '../types/resultView';
 import type { RoomStatus } from '../types/room';
+import { presentationMode, toResultViewItems } from '../utils/resultViewModel';
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -13,7 +15,7 @@ export default function ParticipantWaitingPage() {
   const { participantToken, nickname } = storage.loadParticipantSession();
 
   const [viewState, setViewState] = useState<ViewState>('waiting');
-  const [results, setResults] = useState<LotteryResultItem[]>([]);
+  const [items, setItems] = useState<ResultViewItem[]>([]);
   const [drawnAt, setDrawnAt] = useState('');
   const [ranked, setRanked] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -21,7 +23,6 @@ export default function ParticipantWaitingPage() {
   const checkStatus = async () => {
     if (!roomId) return;
 
-    // Check participants endpoint to get room status
     try {
       const data = await api.getParticipants(roomId);
       const status = data.status as RoomStatus;
@@ -35,21 +36,23 @@ export default function ParticipantWaitingPage() {
         return;
       }
       if (status === 'drawn') {
-        // Try to fetch result
         try {
           const result = await api.getRoomResult(roomId);
-          setResults(result.results);
+          const viewItems = toResultViewItems(result.results, participantToken, nickname);
+          setItems(viewItems);
           setDrawnAt(result.drawnAt);
-          setRanked(result.results.some((r) => r.rank !== null));
+          setRanked(presentationMode(viewItems) === 'ranked');
           setViewState('drawn_public');
         } catch (err) {
-          if (err instanceof ApiClientError && (err.code === 'RESULT_PRIVATE' || err.status === 403)) {
+          if (
+            err instanceof ApiClientError &&
+            (err.code === 'RESULT_PRIVATE' || err.status === 403)
+          ) {
             setViewState('drawn_private');
           } else {
             setViewState('drawn_private');
           }
         }
-        // Stop polling once drawn
         if (pollRef.current) clearInterval(pollRef.current);
       }
     } catch {
@@ -61,93 +64,87 @@ export default function ParticipantWaitingPage() {
     checkStatus();
     pollRef.current = setInterval(checkStatus, POLL_INTERVAL_MS);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
-  const myResult = results.find((r) => r.participant_id === participantToken) ??
-    results.find((r) => r.nickname === nickname);
-  const isWinner = !!myResult;
+  const myItem = items.find((i) => i.isMe);
+  const isWinner = !!myItem;
 
   return (
     <div style={styles.container}>
+
+      {/* ── WAITING ── */}
       {viewState === 'waiting' && (
         <div style={styles.card}>
           <div style={styles.icon}>🎉</div>
           <h1 style={styles.title}>参加完了!</h1>
-          {nickname && (
-            <p style={styles.nicknameText}>ニックネーム: <strong>{nickname}</strong></p>
-          )}
-          <p style={styles.waitingText}>主催者がくじ引きを開始するまでお待ちください。</p>
+          {nickname && <p style={styles.nicknameText}>ニックネーム: <strong>{nickname}</strong></p>}
+          <p style={styles.stateText}>主催者がくじ引きを開始するまでお待ちください。</p>
           <div style={styles.spinner} />
+          <p style={styles.statusLabel}>参加受付中</p>
         </div>
       )}
 
+      {/* ── CLOSED ── */}
       {viewState === 'closed' && (
         <div style={styles.card}>
           <div style={styles.icon}>⏳</div>
           <h1 style={styles.title}>受付終了</h1>
-          {nickname && (
-            <p style={styles.nicknameText}>ニックネーム: <strong>{nickname}</strong></p>
-          )}
-          <p style={styles.waitingText}>もうすぐ抽選が始まります。しばらくお待ちください。</p>
+          {nickname && <p style={styles.nicknameText}>ニックネーム: <strong>{nickname}</strong></p>}
+          <p style={styles.stateText}>まもなく抽選が始まります。</p>
           <div style={styles.spinner} />
+          <p style={styles.statusLabel}>受付終了・抽選待ち</p>
         </div>
       )}
 
+      {/* ── DRAWN + PRIVATE ── */}
       {viewState === 'drawn_private' && (
         <div style={styles.card}>
           <div style={styles.icon}>🎯</div>
           <h1 style={styles.title}>抽選完了</h1>
-          {nickname && (
-            <p style={styles.nicknameText}>ニックネーム: <strong>{nickname}</strong></p>
-          )}
-          <p style={styles.waitingText}>結果は主催者にお聞きください。</p>
+          {nickname && <p style={styles.nicknameText}>ニックネーム: <strong>{nickname}</strong></p>}
+          <p style={styles.stateText}>結果は主催者にお聞きください。</p>
+          <p style={styles.statusLabel}>抽選完了（非公開）</p>
         </div>
       )}
 
+      {/* ── DRAWN + PUBLIC ── */}
       {viewState === 'drawn_public' && (
         <div>
-          <div style={styles.card}>
+          {/* My result card */}
+          <div style={{ ...styles.card, ...(isWinner ? styles.winnerCard : styles.nonWinnerCard) }}>
             <div style={styles.icon}>{isWinner ? '🏆' : '🎊'}</div>
-            <h1 style={styles.title}>{isWinner ? '当選おめでとうございます!' : '抽選結果が出ました'}</h1>
-            {nickname && (
-              <p style={styles.nicknameText}>ニックネーム: <strong>{nickname}</strong></p>
-            )}
-            {isWinner && myResult && (
-              <div style={styles.myResultBox}>
-                {ranked && myResult.rank !== null && (
-                  <span style={styles.myRank}>{myResult.rank}位</span>
+            <h1 style={styles.title}>
+              {isWinner ? '当選おめでとうございます！' : '抽選結果が出ました'}
+            </h1>
+            {nickname && <p style={styles.nicknameText}>ニックネーム: <strong>{nickname}</strong></p>}
+            {isWinner && myItem && (
+              <div style={styles.myHighlight}>
+                {ranked && myItem.rank !== null && (
+                  <span style={styles.myRankBadge}>{myItem.rank}位</span>
                 )}
-                {myResult.role && (
-                  <span style={styles.myRole}>役割: {myResult.role}</span>
+                {myItem.role && (
+                  <span style={styles.myRoleBadge}>役割: {myItem.role}</span>
                 )}
               </div>
             )}
             {!isWinner && (
-              <p style={{ ...styles.waitingText, color: '#6b7280' }}>今回は当選しませんでした。</p>
+              <p style={{ ...styles.stateText, color: '#6b7280' }}>
+                今回は当選しませんでした。
+              </p>
             )}
             {drawnAt && (
               <p style={styles.drawnAt}>{new Date(drawnAt).toLocaleString('ja-JP')}</p>
             )}
           </div>
 
-          <h2 style={styles.allResultsTitle}>全結果</h2>
-          <ul style={styles.resultList}>
-            {results.map((item, idx) => {
-              const isMe = item.participant_id === participantToken || item.nickname === nickname;
-              return (
-                <li key={item.participant_id} style={{ ...styles.resultItem, ...(isMe ? styles.resultItemMe : {}) }}>
-                  <span style={styles.resultRank}>
-                    {ranked && item.rank !== null ? `${item.rank}位` : `${idx + 1}`}
-                  </span>
-                  <span style={styles.resultNickname}>
-                    {item.nickname}{isMe && ' (あなた)'}
-                  </span>
-                  {item.role && <span style={styles.resultRole}>{item.role}</span>}
-                </li>
-              );
-            })}
-          </ul>
+          {/* All results */}
+          <h2 style={styles.allTitle}>全結果</h2>
+          <DrawReveal
+            items={items}
+            ranked={ranked}
+            animate={false}
+          />
         </div>
       )}
 
@@ -157,23 +154,20 @@ export default function ParticipantWaitingPage() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { maxWidth: 480, margin: '0 auto', padding: '40px 16px', fontFamily: 'system-ui, sans-serif' },
-  card: { textAlign: 'center', padding: '32px 24px', border: '1px solid #e0e0e0', borderRadius: 12, background: '#fafafa', marginBottom: 24 },
-  icon: { fontSize: 48, marginBottom: 16 },
-  title: { fontSize: 22, fontWeight: 700, marginBottom: 12, color: '#1a1a1a' },
-  nicknameText: { fontSize: 16, color: '#333', marginBottom: 16 },
-  waitingText: { fontSize: 15, color: '#555', marginBottom: 24 },
-  spinner: { width: 32, height: 32, border: '3px solid #e0e0e0', borderTop: '3px solid #3b82f6', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' },
-  myResultBox: { display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' },
-  myRank: { background: '#fef08a', color: '#92400e', borderRadius: 20, padding: '4px 12px', fontWeight: 700, fontSize: 16 },
-  myRole: { background: '#e0f2fe', color: '#0369a1', borderRadius: 20, padding: '4px 12px', fontSize: 14 },
-  drawnAt: { fontSize: 12, color: '#aaa', marginTop: 8 },
-  allResultsTitle: { fontSize: 16, fontWeight: 600, marginBottom: 12 },
-  resultList: { listStyle: 'none', padding: 0, margin: '0 0 16px' },
-  resultItem: { display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderBottom: '1px solid #eee', borderRadius: 4 },
-  resultItemMe: { background: '#eff6ff', fontWeight: 700 },
-  resultRank: { width: 32, textAlign: 'center', fontSize: 13, color: '#6b7280', flexShrink: 0 },
-  resultNickname: { flex: 1, fontSize: 15 },
-  resultRole: { fontSize: 12, color: '#6b7280', background: '#f3f4f6', borderRadius: 4, padding: '1px 6px' },
-  roomIdText: { fontSize: 12, color: '#aaa', fontFamily: 'monospace', textAlign: 'center', marginTop: 8 },
+  container: { maxWidth: 480, margin: '0 auto', padding: '32px 16px', fontFamily: 'system-ui, sans-serif' },
+  card: { textAlign: 'center', padding: '32px 20px', border: '1px solid #e5e7eb', borderRadius: 12, background: '#fafafa', marginBottom: 24 },
+  winnerCard: { border: '2px solid #fbbf24', background: '#fffbeb' },
+  nonWinnerCard: { background: '#f9fafb' },
+  icon: { fontSize: 48, marginBottom: 12 },
+  title: { fontSize: 21, fontWeight: 700, marginBottom: 10 },
+  nicknameText: { fontSize: 15, color: '#374151', marginBottom: 12 },
+  stateText: { fontSize: 15, color: '#555', marginBottom: 16 },
+  statusLabel: { display: 'inline-block', background: '#e0e7ff', color: '#3730a3', borderRadius: 20, padding: '3px 12px', fontSize: 12, fontWeight: 600, marginTop: 4 },
+  spinner: { width: 30, height: 30, border: '3px solid #e5e7eb', borderTop: '3px solid #3b82f6', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' },
+  myHighlight: { display: 'flex', gap: 8, justifyContent: 'center', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' },
+  myRankBadge: { background: '#fef08a', color: '#92400e', borderRadius: 20, padding: '4px 14px', fontWeight: 700, fontSize: 15 },
+  myRoleBadge: { background: '#e0f2fe', color: '#0369a1', borderRadius: 20, padding: '4px 14px', fontSize: 14 },
+  drawnAt: { fontSize: 12, color: '#9ca3af', marginTop: 8 },
+  allTitle: { fontSize: 15, fontWeight: 600, marginBottom: 12, color: '#374151' },
+  roomIdText: { fontSize: 12, color: '#d1d5db', fontFamily: 'monospace', textAlign: 'center', marginTop: 24 },
 };
