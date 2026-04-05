@@ -1,3 +1,4 @@
+import type { DrawResponse, LotteryResult, LotterySettings } from '../../types/lottery';
 import type {
   CreateRoomResponse,
   JoinRoomResponse,
@@ -63,10 +64,75 @@ export const api = {
     return request<ParticipantsResponse>(`/rooms/${encodeURIComponent(roomId)}/participants`);
   },
 
+  updateRoomSettings(
+    roomId: string,
+    hostToken: string,
+    settings: LotterySettings
+  ): Promise<unknown> {
+    return request(`/rooms/${encodeURIComponent(roomId)}/settings`, {
+      method: 'PATCH',
+      headers: { 'X-Host-Token': hostToken },
+      body: JSON.stringify(settings),
+    });
+  },
+
   closeRoom(roomId: string, hostToken: string): Promise<{ roomId: string; status: string }> {
     return request(`/rooms/${encodeURIComponent(roomId)}/close`, {
       method: 'POST',
       headers: { 'X-Host-Token': hostToken },
     });
+  },
+
+  drawLottery(roomId: string, hostToken: string): Promise<DrawResponse> {
+    return request<DrawResponse>(`/rooms/${encodeURIComponent(roomId)}/draw`, {
+      method: 'POST',
+      headers: { 'X-Host-Token': hostToken },
+    });
+  },
+
+  getRoomResult(roomId: string, hostToken?: string): Promise<LotteryResult> {
+    const headers: Record<string, string> = {};
+    if (hostToken) headers['X-Host-Token'] = hostToken;
+    return request<LotteryResult>(`/rooms/${encodeURIComponent(roomId)}/result`, { headers });
+  },
+};
+
+// ── localStorage helpers ──────────────────────────────
+
+const KEYS = {
+  hostToken: 'party_lottery_host_token',
+  roomId: 'party_lottery_room_id',
+  joinCode: 'party_lottery_join_code',
+  participantToken: 'party_lottery_participant_token',
+  participantNickname: 'party_lottery_participant_nickname',
+} as const;
+
+export const storage = {
+  saveHostSession(roomId: string, joinCode: string, hostToken: string) {
+    localStorage.setItem(KEYS.roomId, roomId);
+    localStorage.setItem(KEYS.joinCode, joinCode);
+    localStorage.setItem(KEYS.hostToken, hostToken);
+  },
+  loadHostSession() {
+    const roomId = localStorage.getItem(KEYS.roomId);
+    const joinCode = localStorage.getItem(KEYS.joinCode);
+    const hostToken = localStorage.getItem(KEYS.hostToken);
+    if (roomId && joinCode && hostToken) return { roomId, joinCode, hostToken };
+    return null;
+  },
+  clearHostSession() {
+    localStorage.removeItem(KEYS.roomId);
+    localStorage.removeItem(KEYS.joinCode);
+    localStorage.removeItem(KEYS.hostToken);
+  },
+  saveParticipantSession(participantToken: string, nickname: string) {
+    localStorage.setItem(KEYS.participantToken, participantToken);
+    localStorage.setItem(KEYS.participantNickname, nickname);
+  },
+  loadParticipantSession() {
+    return {
+      participantToken: localStorage.getItem(KEYS.participantToken) ?? '',
+      nickname: localStorage.getItem(KEYS.participantNickname) ?? '',
+    };
   },
 };

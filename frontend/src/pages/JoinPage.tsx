@@ -1,10 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, ApiClientError } from '../lib/api/client';
+import { api, ApiClientError, storage } from '../lib/api/client';
 import type { Room } from '../types/room';
-
-const PARTICIPANT_TOKEN_KEY = 'party_lottery_participant_token';
-const PARTICIPANT_NICKNAME_KEY = 'party_lottery_participant_nickname';
 
 export default function JoinPage() {
   const { joinCode } = useParams<{ joinCode: string }>();
@@ -59,8 +56,7 @@ export default function JoinPage() {
 
     try {
       const result = await api.joinRoom(room.roomId, trimmed);
-      localStorage.setItem(PARTICIPANT_TOKEN_KEY, result.participantToken);
-      localStorage.setItem(PARTICIPANT_NICKNAME_KEY, trimmed);
+      storage.saveParticipantSession(result.participantToken, trimmed);
       navigate(`/room/${result.roomId}/participant`);
     } catch (err) {
       if (err instanceof ApiClientError) {
